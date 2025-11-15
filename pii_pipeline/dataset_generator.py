@@ -17,37 +17,64 @@ from pathlib import Path
 from difflib import SequenceMatcher
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from config import (
-    BASE_CLEAN_FILE,
-    FINAL_DATASET_DIR,
-    REGEX_VARIANTS_PER_SAMPLE,
-    TEACHER_VARIANTS_PER_SAMPLE,
-    SHUFFLE_FINAL_DATASET,
-)
+try:  # pragma: no cover - allow running as script
+    from .config import (
+        BASE_CLEAN_FILE,
+        FINAL_DATASET_DIR,
+        RAW_MUTATED_DIR,
+        REGEX_VARIANTS_PER_SAMPLE,
+        SHUFFLE_FINAL_DATASET,
+        TEACHER_GENERATED_DIR,
+        TEACHER_VARIANTS_PER_SAMPLE,
+    )
 
-from schemas import (
-    CleanSample,
-    MutatedVariant,
-    FinalRecord,
-    RedactionAnswer,
-    RedactionEntity,
-    SchemaValidationError,
-)
-from utils import (
-    write_json,
-    write_jsonl,
-    log,
-    generate_id,
-)
-from pii_mutation_engine_v2 import mutate_context
-from teacher_prompts import (
-    general_noise_prompt,
-    email_noise_prompt,
-    phone_noise_prompt,
-    address_noise_prompt,
-    credit_card_noise_prompt,
-)
-from teacher_api import generate_teacher_variants
+    from .schemas import (
+        CleanSample,
+        FinalRecord,
+        MutatedVariant,
+        RedactionAnswer,
+        RedactionEntity,
+        SchemaValidationError,
+    )
+    from .utils import generate_id, log, write_json, write_jsonl
+    from .pii_mutation_engine_v2 import mutate_context
+    from .teacher_prompts import (
+        general_noise_prompt,
+        email_noise_prompt,
+        phone_noise_prompt,
+        address_noise_prompt,
+        credit_card_noise_prompt,
+    )
+    from .teacher_api import generate_teacher_variants
+except ImportError:  # pragma: no cover - executed outside package context
+    from config import (  # type: ignore
+        BASE_CLEAN_FILE,
+        FINAL_DATASET_DIR,
+        RAW_MUTATED_DIR,
+        REGEX_VARIANTS_PER_SAMPLE,
+        SHUFFLE_FINAL_DATASET,
+        TEACHER_GENERATED_DIR,
+        TEACHER_VARIANTS_PER_SAMPLE,
+    )
+
+    from schemas import (  # type: ignore
+        CleanSample,
+        FinalRecord,
+        MutatedVariant,
+        RedactionAnswer,
+        RedactionEntity,
+        SchemaValidationError,
+    )
+    from utils import generate_id, log, write_json, write_jsonl  # type: ignore
+    from pii_mutation_engine_v2 import mutate_context  # type: ignore
+    from teacher_prompts import (  # type: ignore
+        general_noise_prompt,
+        email_noise_prompt,
+        phone_noise_prompt,
+        address_noise_prompt,
+        credit_card_noise_prompt,
+    )
+    from teacher_api import generate_teacher_variants  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +378,8 @@ def create_final_records(
     Teacher variants:
       - Already contain both 'corrupted' text and 'answer' (gold redaction) directly.
 
+    """
+
     records: List[FinalRecord] = []
 
     for variant in mutated_variants:
@@ -390,7 +419,10 @@ def create_final_records(
                 continue
 
             records.append(record)
-            log_record_added("teacher", sample_id, record.id, tv["corrupted"])
+            log(
+                "[TEACHER] Added teacher-generated record for "
+                f"sample={sample.id} variant_index={idx}"
+            )
 
     return records
 
@@ -415,7 +447,9 @@ def dedupe_records(records: Sequence[FinalRecord]) -> List[FinalRecord]:
 # STEP 6 — PIPELINE RUNNER
 # ---------------------------------------------------------------------------
 
-def generate_full_dataset() -> List[Dict[str, Any]]:
+def generate_full_dataset(max_records: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Run the full pipeline and return the resulting records as dictionaries."""
+
     clean_samples = load_clean_samples()
     all_records: List[FinalRecord] = []
 
@@ -444,6 +478,14 @@ def generate_full_dataset() -> List[Dict[str, Any]]:
         random.shuffle(all_records)
         log("[SHUFFLE] Final dataset shuffled")
 
+    if max_records is not None:
+        if max_records < 0:
+            raise ValueError("max_records must be non-negative")
+        if max_records == 0:
+            return []
+        if len(all_records) > max_records:
+            all_records = all_records[:max_records]
+
     return [r.to_dict() for r in all_records]
 
 
@@ -451,8 +493,8 @@ def generate_full_dataset() -> List[Dict[str, Any]]:
 # EXPORTER
 # ---------------------------------------------------------------------------
 
-def export_dataset_jsonl():
-    final_records = generate_full_dataset()
+def export_dataset_jsonl(max_records: Optional[int] = None):
+    final_records = generate_full_dataset(max_records=max_records)
     out_path = FINAL_DATASET_DIR / "pii_training_dataset.jsonl"
     write_jsonl(out_path, final_records)
     log(f"Exported {len(final_records)} final records to: {out_path}")
