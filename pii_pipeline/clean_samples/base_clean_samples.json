@@ -1,0 +1,158 @@
+[
+    {
+      "id": "sample_001",
+      "question": "Redact provided text according to the task description and return redacted elements.",
+      "context": "Hi, I'm John Smith. Reach me at john.smith@example.com.",
+      "answer": {
+        "redacted_text": "Hi, I'm [PERSON]. Reach me at [EMAIL].",
+        "entities": [
+          {
+            "value": "John Smith",
+            "replacement_token": "[PERSON]",
+            "reason": "person name"
+          },
+          {
+            "value": "john.smith@example.com",
+            "replacement_token": "[EMAIL]",
+            "reason": "email address"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sample_002",
+      "question": "Redact provided text according to the task description and return redacted elements.",
+      "context": "Please call me at +1 202 555 0198 tomorrow.",
+      "answer": {
+        "redacted_text": "Please call me at [PHONE] tomorrow.",
+        "entities": [
+          {
+            "value": "+1 202 555 0198",
+            "replacement_token": "[PHONE]",
+            "reason": "phone number"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sample_003",
+      "question": "Redact provided text according to the task description and return redacted elements.",
+      "context": "Ship it to 742 Evergreen Terrace, Springfield.",
+      "answer": {
+        "redacted_text": "Ship it to [ADDRESS], Springfield.",
+        "entities": [
+          {
+            "value": "742 Evergreen Terrace",
+            "replacement_token": "[ADDRESS]",
+            "reason": "street address"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sample_004",
+      "question": "Redact provided text according to the task description and return redacted elements.",
+      "context": "Her SSN is 123-45-6789 and she is 29 years old.",
+      "answer": {
+        "redacted_text": "Her SSN is [SSN] and she is [AGE_YEARS:29] years old.",
+        "entities": [
+          {
+            "value": "123-45-6789",
+            "replacement_token": "[SSN]",
+            "reason": "US social security number"
+          },
+          {
+            "value": "29",
+            "replacement_token": "[AGE_YEARS:29]",
+            "reason": "stated age"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sample_005",
+      "question": "Redact provided text according to the task description and return redacted elements.",
+      "context": "Patient MRN 943/476/5872 identifies as female and is single.",
+      "answer": {
+        "redacted_text": "Patient [UUID] identifies as [GENDER] and is [MARITAL_STATUS].",
+        "entities": [
+          {
+            "value": "MRN 943/476/5872",
+            "replacement_token": "[UUID]",
+            "reason": "person-scoped medical record number"
+          },
+          {
+            "value": "female",
+            "replacement_token": "[GENDER]",
+            "reason": "gender self-identification"
+          },
+          {
+            "value": "single",
+            "replacement_token": "[MARITAL_STATUS]",
+            "reason": "marital status"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sample_006",
+      "question": "Redact provided text according to the task description and return redacted elements.",
+      "context": "Card number 4111 1111 1111 1234 was declined.",
+      "answer": {
+        "redacted_text": "Card number [CARD_LAST4:1234] was declined.",
+        "entities": [
+          {
+            "value": "4111 1111 1111 1234",
+            "replacement_token": "[CARD_LAST4:1234]",
+            "reason": "credit card number (keep last-4)"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sample_007",
+      "question": "Redact provided text according to the task description and return redacted elements.",
+      "context": "IBAN: DE89 3704 0044 0532 0130 00. Customer is Asian and married.",
+      "answer": {
+        "redacted_text": "IBAN: [IBAN_LAST4:3000]. Customer is [RACE] and [MARITAL_STATUS].",
+        "entities": [
+          {
+            "value": "DE89 3704 0044 0532 0130 00",
+            "replacement_token": "[IBAN_LAST4:3000]",
+            "reason": "IBAN (keep last-4 digits)"
+          },
+          {
+            "value": "Asian",
+            "replacement_token": "[RACE]",
+            "reason": "race / ethnicity"
+          },
+          {
+            "value": "married",
+            "replacement_token": "[MARITAL_STATUS]",
+            "reason": "marital status"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sample_008",
+      "question": "Redact provided text according to the task description and return redacted elements.",
+      "context": "National ID 80010112345 belongs to Carlos Mendes.",
+      "answer": {
+        "redacted_text": "National ID [ID] belongs to [PERSON].",
+        "entities": [
+          {
+            "value": "80010112345",
+            "replacement_token": "[ID]",
+            "reason": "national ID number"
+          },
+          {
+            "value": "Carlos Mendes",
+            "replacement_token": "[PERSON]",
+            "reason": "person name"
+          }
+        ]
+      }
+    }
+  ]
+  
