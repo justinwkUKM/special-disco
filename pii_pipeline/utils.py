@@ -18,7 +18,10 @@ import string
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-from config import RNG_SEED
+try:  # pragma: no cover - fallback for running as a loose script
+    from .config import RNG_SEED
+except ImportError:  # pragma: no cover - executed when package context missing
+    from config import RNG_SEED  # type: ignore
 
 
 # ---------------------------------------------------------------------------

@@ -16,8 +16,14 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List
 
-from config import MAX_VARIANTS_PER_TYPE
-from utils import read_jsonl, write_jsonl, log
+try:  # pragma: no cover - allow running as script
+    from .config import MAX_VARIANTS_PER_TYPE
+except ImportError:  # pragma: no cover - executed outside package context
+    from config import MAX_VARIANTS_PER_TYPE  # type: ignore
+try:  # pragma: no cover - allow running as script
+    from .utils import read_jsonl, write_jsonl, log
+except ImportError:  # pragma: no cover - executed outside package context
+    from utils import read_jsonl, write_jsonl, log  # type: ignore
 
 
 def infer_pii_type_from_token(token: str) -> str:
