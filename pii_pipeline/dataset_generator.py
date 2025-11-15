@@ -13,6 +13,7 @@ Process:
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from difflib import SequenceMatcher
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -135,7 +136,12 @@ def persist_mutations(sample: CleanSample, variants: Sequence[MutatedVariant]) -
 # STEP 3 — TEACHER-MODEL MUTATIONS
 # ---------------------------------------------------------------------------
 
-def generate_teacher_mutations(sample: CleanSample) -> List[Dict[str, Any]]:
+def generate_teacher_mutations(
+    sample: CleanSample,
+    *,
+    prompt_factory: Optional[Callable[[str], str]] = None,
+    prompt_label: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
     Select prompt based on which PII types appear.
     Teacher generates:
@@ -145,23 +151,28 @@ def generate_teacher_mutations(sample: CleanSample) -> List[Dict[str, Any]]:
 
     context = sample.context.lower()
 
-    # Choose a PII-type-focused prompt
-    if "@" in context or "(at)" in context:
-        prompt = email_noise_prompt(sample.context)
-        log(f"[TEACHER] sample={sample.id} using=email_noise_prompt")
-    elif any(x in context for x in ["-", "(", ")", "+", "call"]):
-        prompt = phone_noise_prompt(sample.context)
-        log(f"[TEACHER] sample={sample.id} using=phone_noise_prompt")
-    elif any(x in context for x in [" st ", "street", " ave", " road", " rd "]):
-        prompt = address_noise_prompt(sample.context)
-        log(f"[TEACHER] sample={sample.id} using=address_noise_prompt")
-    elif any(ch.isdigit() for ch in context) and len(context) > 14:
-        prompt = credit_card_noise_prompt(sample.context)
-        log(f"[TEACHER] sample={sample.id} using=credit_card_noise_prompt")
+    if prompt_factory is not None:
+        prompt = prompt_factory(sample.context)
+        label = prompt_label or getattr(prompt_factory, "__name__", "custom_prompt")
+        log(f"[TEACHER] sample={sample.id} using={label}")
     else:
-        # fallback: general multi-PII prompt
-        prompt = general_noise_prompt(sample.context)
-        log(f"[TEACHER] sample={sample.id} using=general_noise_prompt")
+        # Choose a PII-type-focused prompt
+        if "@" in context or "(at)" in context:
+            prompt = email_noise_prompt(sample.context)
+            log(f"[TEACHER] sample={sample.id} using=email_noise_prompt")
+        elif any(x in context for x in ["-", "(", ")", "+", "call"]):
+            prompt = phone_noise_prompt(sample.context)
+            log(f"[TEACHER] sample={sample.id} using=phone_noise_prompt")
+        elif any(x in context for x in [" st ", "street", " ave", " road", " rd "]):
+            prompt = address_noise_prompt(sample.context)
+            log(f"[TEACHER] sample={sample.id} using=address_noise_prompt")
+        elif any(ch.isdigit() for ch in context) and len(context) > 14:
+            prompt = credit_card_noise_prompt(sample.context)
+            log(f"[TEACHER] sample={sample.id} using=credit_card_noise_prompt")
+        else:
+            # fallback: general multi-PII prompt
+            prompt = general_noise_prompt(sample.context)
+            log(f"[TEACHER] sample={sample.id} using=general_noise_prompt")
 
     try:
         teacher_outputs = generate_teacher_variants(sample, prompt=prompt)
@@ -451,17 +462,53 @@ def generate_full_dataset(max_records: Optional[int] = None) -> List[Dict[str, A
     """Run the full pipeline and return the resulting records as dictionaries."""
 
     clean_samples = load_clean_samples()
+    sample_scenario_map: Dict[str, PromptScenario] = {}
+
+    if scenario_keys:
+        unknown = [key for key in scenario_keys if key not in PROMPT_SCENARIO_MAP]
+        if unknown:
+            raise ValueError(f"Unknown prompt scenario(s): {', '.join(sorted(unknown))}")
+
+        selected = [PROMPT_SCENARIO_MAP[key] for key in scenario_keys]
+        allowed_sample_ids = {
+            sample_id for scenario in selected for sample_id in scenario.sample_ids
+        }
+        sample_scenario_map = {
+            sample_id: scenario for scenario in selected for sample_id in scenario.sample_ids
+        }
+
+        clean_samples = [
+            sample for sample in clean_samples if sample.id in allowed_sample_ids
+        ]
+
+        if not clean_samples:
+            log(
+                "[SCENARIO] No clean samples matched the requested scenarios; returning empty dataset."
+            )
+            return []
+
     all_records: List[FinalRecord] = []
 
     for sample in clean_samples:
         log(f"--- Processing sample {sample.id} ---")
+
+        scenario = sample_scenario_map.get(sample.id)
+        if scenario is not None:
+            log(
+                "[SCENARIO] sample=%s scenario=%s prompt=%s"
+                % (sample.id, scenario.key, scenario.prompt_factory.__name__)
+            )
 
         # 1. Regex corruption
         regex_variants = generate_regex_mutations(sample)
         persist_mutations(sample, regex_variants)
 
         # 2. Teacher corruption (optional)
-        teacher_variants = generate_teacher_mutations(sample)
+        teacher_variants = generate_teacher_mutations(
+            sample,
+            prompt_factory=scenario.prompt_factory if scenario else None,
+            prompt_label=scenario.prompt_factory.__name__ if scenario else None,
+        )
 
         # 3. Pack records
         records = create_final_records(sample, regex_variants, teacher_variants)
@@ -475,6 +522,7 @@ def generate_full_dataset(max_records: Optional[int] = None) -> List[Dict[str, A
     # Shuffle
     if SHUFFLE_FINAL_DATASET:
         import random
+
         random.shuffle(all_records)
         log("[SHUFFLE] Final dataset shuffled")
 
