@@ -14,16 +14,28 @@ import re
 import random
 from typing import List, Dict
 
-from utils import (
-    rand_bool,
-    rand_choice,
-    rand_int,
-    rand_string,
-    pick_prob,
-    normalize_spaces,
-    safe_strip_quotes,
-    log,
-)
+try:  # pragma: no cover - allow execution outside package context
+    from .utils import (
+        rand_bool,
+        rand_choice,
+        rand_int,
+        rand_string,
+        pick_prob,
+        normalize_spaces,
+        safe_strip_quotes,
+        log,
+    )
+except ImportError:  # pragma: no cover - executed when run as loose script
+    from utils import (  # type: ignore
+        rand_bool,
+        rand_choice,
+        rand_int,
+        rand_string,
+        pick_prob,
+        normalize_spaces,
+        safe_strip_quotes,
+        log,
+    )
 
 
 # ---------------------------------------------------------------------------

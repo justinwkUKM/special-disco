@@ -1,133 +1,98 @@
-"""
-teacher_api.py
-Integration layer between the pipeline and the teacher LLM (e.g., OpenAI models).
+"""Integration layer between the pipeline and the teacher LLM.
 
-Exposes:
-- call_teacher_model(prompt) -> List[{"corrupted": str, "answer": {...}}]
-- call_teacher_redact_single(context, question) -> {"redacted_text": str, "entities": [...]}
-
-Both functions assume the model responds with pure JSON.
+This module keeps the high-level API stable while allowing downstream
+deployers to plug in their own LLM client.  The default implementation raises
+``NotImplementedError`` so that callers can gracefully skip teacher generated
+variants when no client is configured.
 """
 
-import os
+from __future__ import annotations
+
 import json
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
-from teacher_prompts import general_noise_prompt
-from schemas import CleanSample, RedactionAnswer, SchemaValidationError
-from utils import log
+try:  # pragma: no cover - allow running as top-level module
+    from .schemas import CleanSample
+    from .teacher_prompts import general_noise_prompt
+    from .utils import log
+except ImportError:  # pragma: no cover - executed when package context missing
+    from schemas import CleanSample  # type: ignore
+    from teacher_prompts import general_noise_prompt  # type: ignore
+    from utils import log  # type: ignore
 
-# Configure client from env var
-# export OPENAI_API_KEY="sk-..."
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# You can override this in env: export TEACHER_MODEL_NAME="gpt-4.1"
-from config import (
-    TEACHER_MODEL_NAME
-)
+def call_teacher_raw(prompt: str) -> str:
+    """Low-level hook for talking to the teacher model.
 
-def call_teacher_model(prompt: str) -> List[Dict[str, Any]]:
-    """
-    Calls the teacher model to generate multiple corrupted variants + gold redactions.
-
-    Expected JSON response from the model:
-    [
-      {
-        "corrupted": "<noisy text>",
-        "answer": {
-          "redacted_text": "...",
-          "entities": [
-            {"value": "...", "replacement_token": "...", "reason": "..."}
-          ]
-        }
-      },
-      ...
-    ]
+    Projects integrating with a real LLM should override this function with
+    the code that performs an API request and returns the raw textual response
+    from the model.  The base implementation intentionally raises
+    ``NotImplementedError`` so the rest of the pipeline can detect that the
+    integration has not been configured yet.
     """
 
-    system_message = (
-        "You are an expert synthetic PII corruption generator and redaction teacher.\n"
-        "You MUST respond with a VALID JSON ARRAY only, no extra text.\n"
-        "Each element must be an object with keys 'corrupted' and 'answer'.\n"
-        "'answer' must contain 'redacted_text' and 'entities', where 'entities' is a list "
-        "of {value, replacement_token, reason}."
-    )
+    raise NotImplementedError("Implement call_teacher_raw() with your LLM client.")
 
-    completion = client.chat.completions.create(
-        model=TEACHER_MODEL_NAME,
-        messages=[
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.4,
-        max_tokens=2048,
-    )
 
-    raw = completion.choices[0].message.content.strip()
+def parse_teacher_output(raw: str) -> List[Dict[str, Any]]:
+    """Parse the teacher model output into structured variants.
+
+    The pipeline expects the teacher to respond with a JSON list where each
+    element looks like ``{"corrupted": str, "answer": {...}}``.  The parser is
+    intentionally strict so that calling code can surface useful errors if the
+    response format drifts.
+    """
+
+    raw = raw.strip()
 
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print("[TEACHER_API] Invalid JSON from call_teacher_model:")
-        print(raw)
-        raise e
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:  # pragma: no cover - integration hook
+        raise ValueError("Teacher output was not valid JSON.") from exc
 
-    if not isinstance(parsed, list):
-        raise ValueError("Teacher model must return a JSON list (array).")
+    if not isinstance(payload, list):
+        raise ValueError("Teacher output must be a JSON list of variant objects.")
 
-    for i, item in enumerate(parsed):
+    for idx, item in enumerate(payload):
         if not isinstance(item, dict):
-            raise ValueError(f"Teacher output element {i} is not an object.")
+            raise ValueError(f"Teacher output element {idx} is not an object.")
         if "corrupted" not in item or "answer" not in item:
-            raise ValueError(f"Teacher output element {i} missing 'corrupted' or 'answer'.")
-
-def generate_teacher_variants(clean_sample: CleanSample, prompt: str | None = None) -> List[Dict]:
-    """
-    Main high-level function:
-    - Builds a prompt for the teacher model based on the clean sample.
-    - Calls teacher model.
-    - Parses response into structured corrupted+answer list.
-    """
-
-
-    # You can choose between different prompts.
-    # For now, use the general multi-PII noise prompt.
-    prompt = prompt or general_noise_prompt(ctx)
-    # or for very hard examples you could switch to teacher_prompts.multi_pii_super_prompt(ctx)
-
-    Expected JSON response from the model:
-    {
-      "redacted_text": "...",
-      "entities": [
-        {"value": "...", "replacement_token": "...", "reason": "..."},
-        ...
-      ]
-    }
-    """
-
-    normalised = []
-    for idx, item in enumerate(variants):
-        answer_payload = item.get("answer")
-        if not answer_payload:
-            raise SchemaValidationError(
-                f"Teacher variant #{idx} is missing an answer payload"
+            raise ValueError(
+                f"Teacher output element {idx} is missing 'corrupted' or 'answer'."
             )
-        answer = RedactionAnswer(**answer_payload)
-        answer.validate()
-        normalised.append({"corrupted": item.get("corrupted", ""), "answer": answer.to_dict()})
 
-    return normalised
+    return payload
 
-    try:
-        answer = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print("[TEACHER_API] Invalid JSON from call_teacher_redact_single:")
-        print(raw)
-        raise e
 
-    if not isinstance(answer, dict):
-        raise ValueError("Teacher redact_single must return a JSON object.")
-    if "redacted_text" not in answer or "entities" not in answer:
-        raise ValueError("Teacher redact_single must return 'redacted_text' and 'entities'.")
+def generate_teacher_variants(
+    clean_sample: CleanSample, prompt: str | None = None
+) -> List[Dict[str, Any]]:
+    """Generate teacher-model variants for a given clean sample.
 
-    return answer
+    When the teacher integration is not configured the function raises
+    ``NotImplementedError``.  ``dataset_generator.generate_teacher_mutations``
+    catches this and simply skips teacher augmentation so the rest of the
+    pipeline continues to operate.
+    """
+
+    ctx = clean_sample.context
+    log(f"[TEACHER] Generating variants for sample {clean_sample.id}")
+
+    prompt = prompt or general_noise_prompt(ctx)
+    raw = call_teacher_raw(prompt)
+    return parse_teacher_output(raw)
+
+
+def call_teacher_redact_single(context: str, question: str) -> Dict[str, Any]:
+    """Request a single redaction response from the teacher model.
+
+    This helper mirrors the legacy API that the CLI test harness expects.  Like
+    :func:`call_teacher_raw`, the default implementation raises
+    ``NotImplementedError`` so deployers can decide how to integrate their LLM
+    provider.
+    """
+
+    raise NotImplementedError(
+        "Implement call_teacher_redact_single() with your LLM client."
+    )
+
