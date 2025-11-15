@@ -16,9 +16,14 @@ import sys
 from pathlib import Path
 from collections import Counter
 
-from utils import read_jsonl, log
-from schemas import FinalRecord, validate_entities
-from balance_dataset import infer_pii_type_from_token
+try:  # pragma: no cover - allow running as script
+    from .utils import read_jsonl, log
+    from .schemas import FinalRecord, validate_entities
+    from .balance_dataset import infer_pii_type_from_token
+except ImportError:  # pragma: no cover - executed outside package context
+    from utils import read_jsonl, log  # type: ignore
+    from schemas import FinalRecord, validate_entities  # type: ignore
+    from balance_dataset import infer_pii_type_from_token  # type: ignore
 
 
 def validate_dataset(path: Path):

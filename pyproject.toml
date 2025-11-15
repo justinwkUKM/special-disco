@@ -13,6 +13,7 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "pydantic>=2.6.3",
     "jsonschema>=4.21.1",
+    "streamlit>=1.34.0",
 ]
 
 # Optional extras for training Gemma 3 270M with Transformers

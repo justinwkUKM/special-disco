@@ -15,8 +15,12 @@ Usage:
 """
 
 import sys
-from utils import log
-from dataset_generator import export_dataset_jsonl
+try:  # pragma: no cover - allow running as script
+    from .utils import log
+    from .dataset_generator import export_dataset_jsonl
+except ImportError:  # pragma: no cover - executed outside package context
+    from utils import log  # type: ignore
+    from dataset_generator import export_dataset_jsonl  # type: ignore
 
 
 def main():
