@@ -16,7 +16,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from difflib import SequenceMatcher
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - allow running as script
     from .config import (
@@ -45,8 +45,6 @@ try:  # pragma: no cover - allow running as script
         phone_noise_prompt,
         address_noise_prompt,
         credit_card_noise_prompt,
-        gender_race_age_noise_prompt,
-        multi_pii_super_prompt,
     )
     from .teacher_api import generate_teacher_variants
 except ImportError:  # pragma: no cover - executed outside package context
@@ -76,114 +74,8 @@ except ImportError:  # pragma: no cover - executed outside package context
         phone_noise_prompt,
         address_noise_prompt,
         credit_card_noise_prompt,
-        gender_race_age_noise_prompt,
-        multi_pii_super_prompt,
     )
     from teacher_api import generate_teacher_variants  # type: ignore
-
-
-@dataclass(frozen=True)
-class PromptScenario:
-    key: str
-    name: str
-    description: str
-    sample_ids: Tuple[str, ...]
-    prompt_factory: Callable[[str], str]
-
-
-PROMPT_SCENARIOS: List[PromptScenario] = [
-    PromptScenario(
-        key="email_contact",
-        name="Email contact introduction",
-        description="Person shares their name and email address for follow up.",
-        sample_ids=("sample_001",),
-        prompt_factory=email_noise_prompt,
-    ),
-    PromptScenario(
-        key="phone_callback",
-        name="Phone callback request",
-        description="Caller provides a phone number for returning their call.",
-        sample_ids=("sample_002",),
-        prompt_factory=phone_noise_prompt,
-    ),
-    PromptScenario(
-        key="shipping_address",
-        name="Shipping address confirmation",
-        description="Customer supplies a street address for delivery.",
-        sample_ids=("sample_003",),
-        prompt_factory=address_noise_prompt,
-    ),
-    PromptScenario(
-        key="ssn_and_age",
-        name="SSN and age disclosure",
-        description="Individual states a social security number along with their age.",
-        sample_ids=("sample_004",),
-        prompt_factory=general_noise_prompt,
-    ),
-    PromptScenario(
-        key="medical_identity",
-        name="Medical record identity",
-        description="Patient references a medical record identifier, gender, and marital status.",
-        sample_ids=("sample_005",),
-        prompt_factory=gender_race_age_noise_prompt,
-    ),
-    PromptScenario(
-        key="credit_card_payment",
-        name="Credit card payment",
-        description="Credit card number is provided while discussing a payment issue.",
-        sample_ids=("sample_006",),
-        prompt_factory=credit_card_noise_prompt,
-    ),
-    PromptScenario(
-        key="iban_and_demographics",
-        name="IBAN and demographics",
-        description="Conversation mentions an IBAN alongside race and marital status.",
-        sample_ids=("sample_007",),
-        prompt_factory=multi_pii_super_prompt,
-    ),
-    PromptScenario(
-        key="national_id_record",
-        name="National ID record",
-        description="Person shares a national identification number and their name.",
-        sample_ids=("sample_008",),
-        prompt_factory=general_noise_prompt,
-    ),
-]
-
-PROMPT_SCENARIO_MAP: Dict[str, PromptScenario] = {
-    scenario.key: scenario for scenario in PROMPT_SCENARIOS
-}
-
-
-# ---------------------------------------------------------------------------
-# PROMPT SCENARIO HELPERS
-# ---------------------------------------------------------------------------
-
-
-def list_prompt_scenarios() -> List[Dict[str, Any]]:
-    """Return metadata describing the available teacher prompt scenarios."""
-
-    scenarios: List[Dict[str, Any]] = []
-    for scenario in PROMPT_SCENARIOS:
-        scenarios.append(
-            {
-                "key": scenario.key,
-                "name": scenario.name,
-                "description": scenario.description,
-                "sample_ids": list(scenario.sample_ids),
-                "prompt_name": getattr(scenario.prompt_factory, "__name__", scenario.key),
-            }
-        )
-    return scenarios
-
-
-def get_prompt_scenario(key: str) -> PromptScenario:
-    """Return the :class:`PromptScenario` identified by ``key``."""
-
-    try:
-        return PROMPT_SCENARIO_MAP[key]
-    except KeyError as exc:  # pragma: no cover - defensive programming
-        raise ValueError(f"Unknown prompt scenario: {key}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -566,10 +458,7 @@ def dedupe_records(records: Sequence[FinalRecord]) -> List[FinalRecord]:
 # STEP 6 — PIPELINE RUNNER
 # ---------------------------------------------------------------------------
 
-def generate_full_dataset(
-    max_records: Optional[int] = None,
-    scenario_keys: Optional[Sequence[str]] = None,
-) -> List[Dict[str, Any]]:
+def generate_full_dataset(max_records: Optional[int] = None) -> List[Dict[str, Any]]:
     """Run the full pipeline and return the resulting records as dictionaries."""
 
     clean_samples = load_clean_samples()
