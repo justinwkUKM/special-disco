@@ -1,174 +1,221 @@
-"""
-schemas.py
-Data schemas and validation helpers for the PII Redaction Dataset Pipeline.
+"""Schema objects and validation helpers for the PII dataset pipeline."""
 
-Defines:
-- CleanSample: raw clean input sample.
-- MutatedVariant: mutated/noisy variant (regex/teacher).
-- FinalRecord: final training sample (question + context + answer).
-- Validation utilities for entities and replacement tokens.
-"""
+from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import List, Dict, Any
-import re
+from dataclasses import dataclass, field, asdict
+from typing import Any, Dict, Iterable, List, Optional
 
 
-# ---------------------------------------------------------------------------
-# ENUM DEFINITIONS
-# ---------------------------------------------------------------------------
-
-PII_TYPES = {
-    "PERSON",
-    "EMAIL",
-    "PHONE",
-    "ADDRESS",
-    "SSN",
-    "ID",
-    "UUID",
-    "CREDIT_CARD",
-    "IBAN",
-    "GENDER",
-    "AGE",
-    "RACE",
-    "MARITAL_STATUS",
-}
-
-# Allowed redaction token patterns
-REPLACEMENT_PATTERNS = {
-    r"\[PERSON\]",
-    r"\[EMAIL\]",
-    r"\[PHONE\]",
-    r"\[ADDRESS\]",
-    r"\[SSN\]",
-    r"\[ID\]",
-    r"\[UUID\]",
-    r"\[CARD_LAST4:\d{4}\]",
-    r"\[IBAN_LAST4:\d{4}\]",
-    r"\[GENDER\]",
-    r"\[AGE_YEARS:\d{1,3}\]",
-    r"\[RACE\]",
-    r"\[MARITAL_STATUS\]",
-}
+class SchemaValidationError(ValueError):
+    """Raised when a schema object fails validation."""
 
 
-# ---------------------------------------------------------------------------
-# DATACLASS STRUCTURES
-# ---------------------------------------------------------------------------
+def _ensure_type(name: str, value: Any, expected_type: type) -> None:
+    if not isinstance(value, expected_type):
+        raise SchemaValidationError(f"{name} must be {expected_type.__name__}; got {type(value).__name__}")
+
+
+def _strip_empty(d: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in d.items() if v not in (None, [], {}, "")}
+
+
+@dataclass
+class RedactionEntity:
+    """Represents a single entity that should be redacted from the text."""
+
+    value: str
+    replacement_token: str
+    reason: str
+    source_value: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.metadata, list):  # safeguard for legacy payloads
+            self.metadata = {str(idx): item for idx, item in enumerate(self.metadata)}
+
+    def validate(self) -> None:
+        _ensure_type("value", self.value, str)
+        _ensure_type("replacement_token", self.replacement_token, str)
+        _ensure_type("reason", self.reason, str)
+        if self.source_value is not None:
+            _ensure_type("source_value", self.source_value, str)
+        _ensure_type("metadata", self.metadata, dict)
+        if not self.value:
+            raise SchemaValidationError("Entity value cannot be empty")
+        if not self.replacement_token.startswith("[") or not self.replacement_token.endswith("]"):
+            raise SchemaValidationError(
+                "Replacement tokens must be wrapped in square brackets (e.g. [PERSON])"
+            )
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        return _strip_empty(data)
+
+
+@dataclass
+class RedactionAnswer:
+    """Answer payload returned by the dataset generator/teacher model."""
+
+    redacted_text: str
+    entities: List[RedactionEntity]
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        normalised_entities: List[RedactionEntity] = []
+        for ent in self.entities:
+            if isinstance(ent, RedactionEntity):
+                normalised_entities.append(ent)
+            elif isinstance(ent, dict):
+                normalised_entities.append(RedactionEntity(**ent))
+            else:
+                raise SchemaValidationError(
+                    "Entities must be RedactionEntity instances or dictionaries"
+                )
+        self.entities = normalised_entities
+        if isinstance(self.metadata, list):
+            self.metadata = {str(idx): item for idx, item in enumerate(self.metadata)}
+
+    def validate(self) -> None:
+        _ensure_type("redacted_text", self.redacted_text, str)
+        _ensure_type("entities", self.entities, list)
+        _ensure_type("metadata", self.metadata, dict)
+        if not self.redacted_text:
+            raise SchemaValidationError("Answer.redacted_text cannot be empty")
+        if not self.entities:
+            raise SchemaValidationError("Answer must contain at least one entity")
+        for ent in self.entities:
+            ent.validate()
+            if ent.replacement_token not in self.redacted_text:
+                raise SchemaValidationError(
+                    f"Replacement token {ent.replacement_token} missing from redacted_text"
+                )
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = {
+            "redacted_text": self.redacted_text,
+            "entities": [ent.to_dict() for ent in self.entities],
+        }
+        if self.metadata:
+            payload["metadata"] = self.metadata
+        return payload
+
 
 @dataclass
 class CleanSample:
-    """
-    Raw clean input sample.
+    """Represents a pristine training sample prior to mutation."""
 
-    Fields must match the JSON in clean_samples/base_clean_samples.json:
-    {
-      "id": "sample_001",
-      "question": "...",
-      "context": "...",
-      "answer": {
-          "redacted_text": "...",
-          "entities": [...]
-      }
-    }
-    """
     id: str
     question: str
     context: str
-    answer: Dict[str, Any]
+    answer: RedactionAnswer
+    tags: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def validate(self) -> bool:
-        if not isinstance(self.id, str):
-            raise ValueError("CleanSample.id must be a string")
-        if not isinstance(self.question, str):
-            raise ValueError("CleanSample.question must be a string")
-        if not isinstance(self.context, str):
-            raise ValueError("CleanSample.context must be a string")
-        if "redacted_text" not in self.answer:
-            raise ValueError("CleanSample.answer missing 'redacted_text'")
-        if "entities" not in self.answer:
-            raise ValueError("CleanSample.answer missing 'entities'")
-        if not isinstance(self.answer["entities"], list):
-            raise ValueError("CleanSample.answer.entities must be a list")
-        return True
+    def __post_init__(self) -> None:
+        if isinstance(self.answer, dict):
+            self.answer = RedactionAnswer(**self.answer)
+        if isinstance(self.metadata, list):
+            self.metadata = {str(idx): item for idx, item in enumerate(self.metadata)}
+
+    def validate(self) -> None:
+        for field_name in ("id", "question", "context"):
+            _ensure_type(field_name, getattr(self, field_name), str)
+            if not getattr(self, field_name):
+                raise SchemaValidationError(f"{field_name} cannot be empty")
+        _ensure_type("tags", self.tags, list)
+        _ensure_type("metadata", self.metadata, dict)
+        self.answer.validate()
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = {
+            "id": self.id,
+            "question": self.question,
+            "context": self.context,
+            "answer": self.answer.to_dict(),
+        }
+        if self.tags:
+            payload["tags"] = self.tags
+        if self.metadata:
+            payload["metadata"] = self.metadata
+        return payload
 
 
 @dataclass
 class MutatedVariant:
-    """A single mutated/noisy variant derived from a clean sample."""
+    """Intermediate mutated context waiting for labeling."""
+
     id: str
     parent_id: str
     mutated_context: str
-    mutation_type: str  # "regex", "teacher", "mixed"
+    mutation_type: str
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def validate(self) -> bool:
-        if not isinstance(self.id, str):
-            raise ValueError("MutatedVariant.id must be a string")
-        if not isinstance(self.parent_id, str):
-            raise ValueError("MutatedVariant.parent_id must be a string")
-        if not isinstance(self.mutated_context, str):
-            raise ValueError("MutatedVariant.mutated_context must be a string")
-        if self.mutation_type not in {"regex", "teacher", "mixed"}:
-            raise ValueError("MutatedVariant.mutation_type must be one of {'regex','teacher','mixed'}")
-        return True
+    def __post_init__(self) -> None:
+        if isinstance(self.metadata, list):
+            self.metadata = {str(idx): item for idx, item in enumerate(self.metadata)}
+
+    def validate(self) -> None:
+        for field_name in ("id", "parent_id", "mutated_context", "mutation_type"):
+            _ensure_type(field_name, getattr(self, field_name), str)
+            if not getattr(self, field_name):
+                raise SchemaValidationError(f"{field_name} cannot be empty")
+        _ensure_type("metadata", self.metadata, dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = {
+            "id": self.id,
+            "parent_id": self.parent_id,
+            "mutated_context": self.mutated_context,
+            "mutation_type": self.mutation_type,
+        }
+        if self.metadata:
+            payload["metadata"] = self.metadata
+        return payload
 
 
 @dataclass
 class FinalRecord:
-    """
-    Final dataset element: model input/output pair.
+    """Fully labeled record ready for training."""
 
-    Contains:
-    - id: unique record id
-    - question: the task instruction
-    - context: input text for the model
-    - answer: gold output with redacted_text + entities[]
-    """
     id: str
     question: str
     context: str
-    answer: Dict[str, Any]
+    answer: RedactionAnswer
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def validate(self) -> bool:
-        if "redacted_text" not in self.answer:
-            raise ValueError("FinalRecord.answer missing 'redacted_text'")
-        if "entities" not in self.answer:
-            raise ValueError("FinalRecord.answer missing 'entities'")
-        if not isinstance(self.answer["entities"], list):
-            raise ValueError("FinalRecord.answer.entities must be a list")
+    def __post_init__(self) -> None:
+        if isinstance(self.answer, dict):
+            self.answer = RedactionAnswer(**self.answer)
+        if isinstance(self.metadata, list):
+            self.metadata = {str(idx): item for idx, item in enumerate(self.metadata)}
 
-        # Validate entities individually
-        if not validate_entities(self.answer["entities"]):
-            raise ValueError("FinalRecord.answer.entities failed validation")
+    def validate(self) -> None:
+        for field_name in ("id", "question", "context"):
+            _ensure_type(field_name, getattr(self, field_name), str)
+            if not getattr(self, field_name):
+                raise SchemaValidationError(f"{field_name} cannot be empty")
+        _ensure_type("metadata", self.metadata, dict)
+        self.answer.validate()
 
+    def to_dict(self) -> Dict[str, Any]:
+        payload = {
+            "id": self.id,
+            "question": self.question,
+            "context": self.context,
+            "answer": self.answer.to_dict(),
+        }
+        if self.metadata:
+            payload["metadata"] = self.metadata
+        return payload
+
+
+def validate_entities(entities: Iterable[Dict[str, Any]]) -> bool:
+    """Lightweight validator for entity dictionaries."""
+
+    try:
+        for ent in entities:
+            RedactionEntity(**ent).validate()
         return True
+    except SchemaValidationError:
+        return False
 
-
-# ---------------------------------------------------------------------------
-# VALIDATION HELPERS
-# ---------------------------------------------------------------------------
-
-def validate_replacement_token(token: str) -> bool:
-    """Return True if token matches one of the allowed replacement tokens."""
-    return any(re.fullmatch(pattern, token) for pattern in REPLACEMENT_PATTERNS)
-
-
-def validate_entities(entities: List[Dict[str, Any]]) -> bool:
-    """
-    Validate structure of entities array:
-    Each entity must have {value, replacement_token, reason}
-    and replacement_token must match the policy.
-    """
-    for ent in entities:
-        if not {"value", "replacement_token", "reason"} <= set(ent.keys()):
-            return False
-        if not isinstance(ent["value"], str):
-            return False
-        if not isinstance(ent["replacement_token"], str):
-            return False
-        if not isinstance(ent["reason"], str):
-            return False
-        if not validate_replacement_token(ent["replacement_token"]):
-            return False
-    return True

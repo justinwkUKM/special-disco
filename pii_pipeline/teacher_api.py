@@ -13,7 +13,9 @@ import os
 import json
 from typing import List, Dict, Any
 
-from openai import OpenAI
+from teacher_prompts import general_noise_prompt
+from schemas import CleanSample, RedactionAnswer, SchemaValidationError
+from utils import log
 
 # Configure client from env var
 # export OPENAI_API_KEY="sk-..."
@@ -79,12 +81,19 @@ def call_teacher_model(prompt: str) -> List[Dict[str, Any]]:
         if "corrupted" not in item or "answer" not in item:
             raise ValueError(f"Teacher output element {i} missing 'corrupted' or 'answer'.")
 
-    return parsed
-
-
-def call_teacher_redact_single(context: str, question: str) -> Dict[str, Any]:
+def generate_teacher_variants(clean_sample: CleanSample, prompt: str | None = None) -> List[Dict]:
     """
-    Ask the teacher model to redact a single piece of text.
+    Main high-level function:
+    - Builds a prompt for the teacher model based on the clean sample.
+    - Calls teacher model.
+    - Parses response into structured corrupted+answer list.
+    """
+
+
+    # You can choose between different prompts.
+    # For now, use the general multi-PII noise prompt.
+    prompt = prompt or general_noise_prompt(ctx)
+    # or for very hard examples you could switch to teacher_prompts.multi_pii_super_prompt(ctx)
 
     Expected JSON response from the model:
     {
@@ -96,32 +105,18 @@ def call_teacher_redact_single(context: str, question: str) -> Dict[str, Any]:
     }
     """
 
-    system_message = (
-        "You are an expert PII redaction model.\n"
-        "Given a text, you must return a JSON object with exactly:\n"
-        '{ "redacted_text": "...", "entities": [ ... ] }\n\n'
-        "Where entities is a list of objects with keys: value, replacement_token, reason.\n"
-        "Do NOT include any explanation or text outside the JSON object."
-    )
+    normalised = []
+    for idx, item in enumerate(variants):
+        answer_payload = item.get("answer")
+        if not answer_payload:
+            raise SchemaValidationError(
+                f"Teacher variant #{idx} is missing an answer payload"
+            )
+        answer = RedactionAnswer(**answer_payload)
+        answer.validate()
+        normalised.append({"corrupted": item.get("corrupted", ""), "answer": answer.to_dict()})
 
-    user_message = (
-        f"Question: {question}\n\n"
-        "Text to redact:\n"
-        f"\"\"\"{context}\"\"\"\n\n"
-        "Return ONLY a JSON object with keys 'redacted_text' and 'entities'."
-    )
-
-    completion = client.chat.completions.create(
-        model=TEACHER_MODEL_NAME,
-        messages=[
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0.2,
-        max_tokens=1024,
-    )
-
-    raw = completion.choices[0].message.content.strip()
+    return normalised
 
     try:
         answer = json.loads(raw)
