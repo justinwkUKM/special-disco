@@ -21,7 +21,8 @@ Uses:
 
 import json
 from pathlib import Path
-from typing import List, Dict
+from difflib import SequenceMatcher
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from config import (
     BASE_CLEAN_FILE,
@@ -33,21 +34,29 @@ from config import (
     SHUFFLE_FINAL_DATASET,
 )
 
-from schemas import CleanSample, MutatedVariant, FinalRecord
+from schemas import (
+    CleanSample,
+    MutatedVariant,
+    FinalRecord,
+    RedactionAnswer,
+    RedactionEntity,
+    SchemaValidationError,
+)
 from utils import (
-    read_jsonl,
     write_json,
     write_jsonl,
-    append_jsonl,
     log,
     generate_id,
-    rand_choice,
 )
 from pii_mutation_engine_v2 import mutate_context
-from teacher_prompts import general_noise_prompt, multi_pii_super_prompt
-from teacher_prompts import email_noise_prompt, phone_noise_prompt
-from teacher_prompts import address_noise_prompt, credit_card_noise_prompt
-from teacher_prompts import gender_race_age_noise_prompt
+from teacher_prompts import (
+    general_noise_prompt,
+    email_noise_prompt,
+    phone_noise_prompt,
+    address_noise_prompt,
+    credit_card_noise_prompt,
+)
+from teacher_api import generate_teacher_variants
 
 
 # ---------------------------------------------------------------------------
@@ -92,36 +101,22 @@ def generate_regex_mutations(sample: CleanSample) -> List[MutatedVariant]:
     return variants
 
 
+def persist_mutations(sample: CleanSample, variants: Sequence[MutatedVariant]) -> None:
+    """Write mutated variants for inspection/replay."""
+
+    path = RAW_MUTATED_DIR / f"{sample.id}_regex.json"
+    payload = {
+        "sample": sample.to_dict(),
+        "variants": [v.to_dict() for v in variants],
+    }
+    write_json(path, payload)
+
+
 # ---------------------------------------------------------------------------
 # STEP 3 — TEACHER-MODEL MUTATIONS
 # ---------------------------------------------------------------------------
 
-def call_teacher_model(prompt: str) -> List[Dict[str, any]]:
-    """
-    Placeholder method for ChatGPT 5.1 API call.
-
-    Expected return:
-      [
-        {
-          "corrupted": "...",
-          "answer": {
-              "redacted_text": "...",
-              "entities": [...]
-          }
-        },
-        ...
-      ]
-    """
-
-    # Developer will implement this with their API key.
-    #
-    # return openai.chat.completions(...)
-    #
-    # Here we raise, because we don't execute teacher calls in pipeline.
-    raise NotImplementedError("Teacher-model call must be implemented by the user.")
-
-
-def generate_teacher_mutations(sample: CleanSample) -> List[Dict[str, any]]:
+def generate_teacher_mutations(sample: CleanSample) -> List[Dict[str, Any]]:
     """
     Select prompt based on which PII types appear.
     Teacher generates:
@@ -142,13 +137,196 @@ def generate_teacher_mutations(sample: CleanSample) -> List[Dict[str, any]]:
         # fallback
         prompt = general_noise_prompt(sample.context)
 
-    # Real logic:
-    # teacher_outputs = call_teacher_model(prompt)
+    try:
+        teacher_outputs = generate_teacher_variants(sample, prompt=prompt)
+    except NotImplementedError:
+        log("Teacher API not configured; skipping teacher-generated variants.")
+        return []
 
-    # For now:
-    raise NotImplementedError(
-        "Teacher generating function requires implementing call_teacher_model."
+    if TEACHER_VARIANTS_PER_SAMPLE and len(teacher_outputs) > TEACHER_VARIANTS_PER_SAMPLE:
+        teacher_outputs = teacher_outputs[:TEACHER_VARIANTS_PER_SAMPLE]
+
+    # Persist prompt/response for auditability
+    out_path = TEACHER_GENERATED_DIR / f"{sample.id}_teacher.jsonl"
+    records = []
+    for idx, variant in enumerate(teacher_outputs):
+        payload = {
+            "prompt": prompt,
+            "variant_index": idx,
+            "corrupted": variant.get("corrupted"),
+            "answer": variant.get("answer"),
+        }
+        records.append(payload)
+    if records:
+        write_jsonl(out_path, records)
+
+    return teacher_outputs
+
+
+# ---------------------------------------------------------------------------
+# STEP 4A — AUTOMATED LABELING FOR REGEX VARIANTS
+# ---------------------------------------------------------------------------
+
+
+def _overlaps(span: Tuple[int, int], others: Sequence[Tuple[int, int]]) -> bool:
+    s1, e1 = span
+    for s2, e2 in others:
+        if s1 < e2 and e1 > s2:
+            return True
+    return False
+
+
+def _candidate_spans(
+    text: str, target: str, *, max_expand: int = 4, min_ratio: float = 0.55
+) -> List[Tuple[float, int, int]]:
+    """Return candidate spans sorted by similarity to the target string."""
+
+    text_lower = text.lower()
+    target_lower = target.lower()
+    base_len = len(target_lower)
+
+    results: List[Tuple[float, int, int]] = []
+
+    # Direct substring matches receive a perfect score
+    idx = text_lower.find(target_lower)
+    while idx != -1:
+        results.append((1.0, idx, idx + base_len))
+        idx = text_lower.find(target_lower, idx + 1)
+
+    if base_len == 0:
+        return results
+
+    matcher = SequenceMatcher()
+    for start in range(len(text_lower)):
+        for extra in range(-max_expand, max_expand + 1):
+            length = base_len + extra
+            if length <= 0:
+                continue
+            end = start + length
+            if end > len(text_lower):
+                continue
+            window = text_lower[start:end]
+            matcher.set_seqs(window, target_lower)
+            ratio = matcher.ratio()
+            if ratio >= min_ratio:
+                results.append((ratio, start, end))
+
+    results.sort(key=lambda item: item[0], reverse=True)
+    return results
+
+
+def _align_entities(
+    mutated_context: str, entities: Sequence[RedactionEntity]
+) -> Optional[List[Tuple[int, int, RedactionEntity, float]]]:
+    matches: List[Tuple[int, int, RedactionEntity, float]] = []
+    occupied: List[Tuple[int, int]] = []
+    cursor = 0
+
+    for entity in entities:
+        target = entity.source_value or entity.value
+        candidates = _candidate_spans(mutated_context, target)
+
+        chosen: Optional[Tuple[int, int, float]] = None
+        for score, start, end in candidates:
+            if start < cursor and score < 0.95:
+                # prefer monotonic alignment but allow near-perfect early matches
+                continue
+            if _overlaps((start, end), occupied):
+                continue
+            chosen = (start, end, score)
+            break
+
+        if chosen is None:
+            # As a final fallback, search anywhere disregarding cursor progression
+            for score, start, end in candidates:
+                if _overlaps((start, end), occupied):
+                    continue
+                chosen = (start, end, score)
+                break
+
+        if chosen is None:
+            log(
+                f"[ALIGN] Failed to align entity '{entity.value}' in mutated context; dropping variant."
+            )
+            return None
+
+        start, end, score = chosen
+        matches.append((start, end, entity, score))
+        occupied.append((start, end))
+        cursor = end
+
+    matches.sort(key=lambda item: item[0])
+    return matches
+
+
+def auto_label_variant(sample: CleanSample, variant: MutatedVariant) -> Optional[FinalRecord]:
+    """Attempt to produce a labeled record for the mutated variant."""
+
+    aligned = _align_entities(variant.mutated_context, sample.answer.entities)
+    if not aligned:
+        return None
+
+    pieces: List[str] = []
+    cursor = 0
+    entities: List[RedactionEntity] = []
+
+    for start, end, original_entity, score in aligned:
+        pieces.append(variant.mutated_context[cursor:start])
+        pieces.append(original_entity.replacement_token)
+        captured_value = variant.mutated_context[start:end]
+        cursor = end
+
+        entity_payload = RedactionEntity(
+            value=captured_value,
+            replacement_token=original_entity.replacement_token,
+            reason=original_entity.reason,
+            source_value=original_entity.value,
+            metadata={
+                "match_score": round(score, 3),
+                "source": "regex_auto_alignment",
+                "mutation_id": variant.id,
+            },
+        )
+        entities.append(entity_payload)
+
+    pieces.append(variant.mutated_context[cursor:])
+    redacted_text = "".join(pieces)
+
+    answer = RedactionAnswer(
+        redacted_text=redacted_text,
+        entities=entities,
+        metadata={
+            "label_source": "auto_alignment",
+            "parent_sample_id": sample.id,
+            "mutation_id": variant.id,
+        },
     )
+
+    try:
+        answer.validate()
+    except SchemaValidationError as exc:
+        log(f"[ALIGN] Validation failed for variant {variant.id}: {exc}")
+        return None
+
+    record = FinalRecord(
+        id=generate_id("rec"),
+        question=sample.question,
+        context=variant.mutated_context,
+        answer=answer,
+        metadata={
+            "source": "regex_mutation",
+            "parent_sample_id": sample.id,
+            "mutation_type": variant.mutation_type,
+        },
+    )
+
+    try:
+        record.validate()
+    except SchemaValidationError as exc:
+        log(f"[ALIGN] Final record validation failed for variant {variant.id}: {exc}")
+        return None
+
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -157,34 +335,48 @@ def generate_teacher_mutations(sample: CleanSample) -> List[Dict[str, any]]:
 
 def create_final_records(
     sample: CleanSample,
-    mutated_variants: List[MutatedVariant],
-    teacher_variants: List[Dict[str, any]] = None
+    mutated_variants: Sequence[MutatedVariant],
+    teacher_variants: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> List[FinalRecord]:
 
-    records = []
+    records: List[FinalRecord] = []
 
-    # Regex variants require teacher redaction (gold label)
-    for mv in mutated_variants:
-        # placeholder: no teacher model used here
-        record = FinalRecord(
-            id=generate_id("rec"),
-            question=sample.question,
-            context=mv.mutated_context,
-            answer=sample.answer  # TEMPORARY placeholder
-        )
-        record.validate()
-        records.append(record)
+    for variant in mutated_variants:
+        record = auto_label_variant(sample, variant)
+        if record:
+            records.append(record)
 
-    # Teacher-provided gold variants (when API implemented)
     if teacher_variants:
-        for tv in teacher_variants:
+        for idx, tv in enumerate(teacher_variants):
+            answer_payload = tv.get("answer")
+            if not answer_payload:
+                log(f"[TEACHER] Missing answer in teacher variant #{idx}; skipping")
+                continue
+            try:
+                answer = RedactionAnswer(**answer_payload)
+                answer.validate()
+            except SchemaValidationError as exc:
+                log(f"[TEACHER] Invalid answer payload in variant #{idx}: {exc}")
+                continue
+
             record = FinalRecord(
                 id=generate_id("rec"),
                 question=sample.question,
-                context=tv["corrupted"],
-                answer=tv["answer"]
+                context=tv.get("corrupted", ""),
+                answer=answer,
+                metadata={
+                    "source": "teacher",
+                    "parent_sample_id": sample.id,
+                    "teacher_variant_index": idx,
+                },
             )
-            record.validate()
+
+            try:
+                record.validate()
+            except SchemaValidationError as exc:
+                log(f"[TEACHER] Final record validation failed: {exc}")
+                continue
+
             records.append(record)
 
     return records
@@ -194,11 +386,11 @@ def create_final_records(
 # STEP 5 — DEDUPLICATION
 # ---------------------------------------------------------------------------
 
-def dedupe_records(records: List[FinalRecord]) -> List[FinalRecord]:
+def dedupe_records(records: Sequence[FinalRecord]) -> List[FinalRecord]:
     seen = set()
     unique = []
     for r in records:
-        key = (r.context, r.answer["redacted_text"])
+        key = (r.context, r.answer.redacted_text)
         if key not in seen:
             unique.append(r)
             seen.add(key)
@@ -209,7 +401,7 @@ def dedupe_records(records: List[FinalRecord]) -> List[FinalRecord]:
 # STEP 6 — PIPELINE RUNNER
 # ---------------------------------------------------------------------------
 
-def generate_full_dataset() -> List[Dict[str, any]]:
+def generate_full_dataset() -> List[Dict[str, Any]]:
     clean_samples = load_clean_samples()
     all_records: List[FinalRecord] = []
 
@@ -218,11 +410,10 @@ def generate_full_dataset() -> List[Dict[str, any]]:
 
         # 1. Regex corruption
         regex_variants = generate_regex_mutations(sample)
+        persist_mutations(sample, regex_variants)
 
         # 2. Teacher corruption (optional)
-        # teacher_variants = generate_teacher_mutations(sample)
-
-        teacher_variants = []  # Placeholder (teacher not executed here)
+        teacher_variants = generate_teacher_mutations(sample)
 
         # 3. Pack records
         records = create_final_records(sample, regex_variants, teacher_variants)
@@ -237,7 +428,7 @@ def generate_full_dataset() -> List[Dict[str, any]]:
         import random
         random.shuffle(all_records)
 
-    return [r.__dict__ for r in all_records]
+    return [r.to_dict() for r in all_records]
 
 
 # ---------------------------------------------------------------------------

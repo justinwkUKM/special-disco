@@ -201,6 +201,9 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Pipeline artefacts
+pii_pipeline/outputs/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

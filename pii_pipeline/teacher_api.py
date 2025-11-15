@@ -25,8 +25,8 @@ You will need to:
 
 from typing import List, Dict
 
-from teacher_prompts import general_noise_prompt, multi_pii_super_prompt
-from schemas import CleanSample
+from teacher_prompts import general_noise_prompt
+from schemas import CleanSample, RedactionAnswer, SchemaValidationError
 from utils import log
 
 # If using OpenAI, you would do something like:
@@ -86,7 +86,7 @@ def parse_teacher_output(raw: str) -> List[Dict]:
     raise ValueError("Teacher output format not recognized; please adjust parse_teacher_output().")
 
 
-def generate_teacher_variants(clean_sample: CleanSample) -> List[Dict]:
+def generate_teacher_variants(clean_sample: CleanSample, prompt: str | None = None) -> List[Dict]:
     """
     Main high-level function:
     - Builds a prompt for the teacher model based on the clean sample.
@@ -99,15 +99,22 @@ def generate_teacher_variants(clean_sample: CleanSample) -> List[Dict]:
 
     # You can choose between different prompts.
     # For now, use the general multi-PII noise prompt.
-    prompt = general_noise_prompt(ctx)
-    # or for very hard examples:
-    # prompt = multi_pii_super_prompt(ctx)
+    prompt = prompt or general_noise_prompt(ctx)
+    # or for very hard examples you could switch to teacher_prompts.multi_pii_super_prompt(ctx)
 
     raw = call_teacher_raw(prompt)
     variants = parse_teacher_output(raw)
 
-    # Each `variants[i]` is expected to have:
-    #   - variants[i]["corrupted"]
-    #   - variants[i]["answer"]
-    return variants
+    normalised = []
+    for idx, item in enumerate(variants):
+        answer_payload = item.get("answer")
+        if not answer_payload:
+            raise SchemaValidationError(
+                f"Teacher variant #{idx} is missing an answer payload"
+            )
+        answer = RedactionAnswer(**answer_payload)
+        answer.validate()
+        normalised.append({"corrupted": item.get("corrupted", ""), "answer": answer.to_dict()})
+
+    return normalised
 
