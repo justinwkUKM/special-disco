@@ -1,113 +1,138 @@
 """
 teacher_api.py
-Integration layer between the pipeline and the teacher LLM (e.g., ChatGPT 5.1).
+Integration layer between the pipeline and the teacher LLM (e.g., OpenAI models).
 
-This module exposes a single main function:
+Exposes:
+- call_teacher_model(prompt) -> List[{"corrupted": str, "answer": {...}}]
+- call_teacher_redact_single(context, question) -> {"redacted_text": str, "entities": [...]}
 
-    generate_teacher_variants(clean_sample: CleanSample) -> List[Dict]
-
-Each returned dict MUST look like:
-{
-  "corrupted": "<noisy text>",
-  "answer": {
-      "redacted_text": "...",
-      "entities": [
-          {"value": "...", "replacement_token": "...", "reason": "..."},
-          ...
-      ]
-  }
-}
-
-You will need to:
-- Plug in your OpenAI / other LLM client.
-- Ensure the model follows the redaction schema.
+Both functions assume the model responds with pure JSON.
 """
 
-from typing import List, Dict
+import os
+import json
+from typing import List, Dict, Any
 
-from teacher_prompts import general_noise_prompt, multi_pii_super_prompt
-from schemas import CleanSample
-from utils import log
+from openai import OpenAI
 
-# If using OpenAI, you would do something like:
-# import openai
-# from config import TEACHER_MODEL_NAME, TEMPERATURE, TOP_P, MAX_TOKENS
+# Configure client from env var
+# export OPENAI_API_KEY="sk-..."
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# You can override this in env: export TEACHER_MODEL_NAME="gpt-4.1"
+from config import (
+    TEACHER_MODEL_NAME
+)
 
-def call_teacher_raw(prompt: str) -> str:
+def call_teacher_model(prompt: str) -> List[Dict[str, Any]]:
     """
-    Low-level call to the teacher model.
+    Calls the teacher model to generate multiple corrupted variants + gold redactions.
 
-    Returns the raw text response from the LLM.
-    You MUST implement this for your environment.
+    Expected JSON response from the model:
+    [
+      {
+        "corrupted": "<noisy text>",
+        "answer": {
+          "redacted_text": "...",
+          "entities": [
+            {"value": "...", "replacement_token": "...", "reason": "..."}
+          ]
+        }
+      },
+      ...
+    ]
     """
-    # Example (pseudo-code):
-    #
-    # completion = openai.ChatCompletion.create(
-    #     model=TEACHER_MODEL_NAME,
-    #     messages=[
-    #         {"role": "system", "content": SYSTEM_PROMPT},
-    #         {"role": "user", "content": prompt}
-    #     ],
-    #     temperature=TEMPERATURE,
-    #     top_p=TOP_P,
-    #     max_tokens=MAX_TOKENS,
-    # )
-    # return completion.choices[0].message["content"]
-    #
-    raise NotImplementedError("Implement call_teacher_raw() with your LLM client.")
 
+    system_message = (
+        "You are an expert synthetic PII corruption generator and redaction teacher.\n"
+        "You MUST respond with a VALID JSON ARRAY only, no extra text.\n"
+        "Each element must be an object with keys 'corrupted' and 'answer'.\n"
+        "'answer' must contain 'redacted_text' and 'entities', where 'entities' is a list "
+        "of {value, replacement_token, reason}."
+    )
 
-def parse_teacher_output(raw: str) -> List[Dict]:
-    """
-    Parse the teacher model output into a structured list.
+    completion = client.chat.completions.create(
+        model=TEACHER_MODEL_NAME,
+        messages=[
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.4,
+        max_tokens=2048,
+    )
 
-    Expectation:
-    - The teacher returns either:
-      * a JSON list, OR
-      * a block containing multiple JSON objects.
+    raw = completion.choices[0].message.content.strip()
 
-    You can adapt this parser based on your chosen output format.
-    """
-    import json
-
-    raw = raw.strip()
-
-    # Simplest assumption: teacher returns a JSON list
     try:
-        data = json.loads(raw)
-        # expected: [{"corrupted": "...", "answer": {...}}, ...]
-        if isinstance(data, list):
-            return data
-    except Exception:
-        pass
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print("[TEACHER_API] Invalid JSON from call_teacher_model:")
+        print(raw)
+        raise e
 
-    # If you want to support more flexible formats, you can add regex parsing here.
-    raise ValueError("Teacher output format not recognized; please adjust parse_teacher_output().")
+    if not isinstance(parsed, list):
+        raise ValueError("Teacher model must return a JSON list (array).")
+
+    for i, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            raise ValueError(f"Teacher output element {i} is not an object.")
+        if "corrupted" not in item or "answer" not in item:
+            raise ValueError(f"Teacher output element {i} missing 'corrupted' or 'answer'.")
+
+    return parsed
 
 
-def generate_teacher_variants(clean_sample: CleanSample) -> List[Dict]:
+def call_teacher_redact_single(context: str, question: str) -> Dict[str, Any]:
     """
-    Main high-level function:
-    - Builds a prompt for the teacher model based on the clean sample.
-    - Calls teacher model.
-    - Parses response into structured corrupted+answer list.
+    Ask the teacher model to redact a single piece of text.
+
+    Expected JSON response from the model:
+    {
+      "redacted_text": "...",
+      "entities": [
+        {"value": "...", "replacement_token": "...", "reason": "..."},
+        ...
+      ]
+    }
     """
 
-    ctx = clean_sample.context
-    log(f"[TEACHER] Generating variants for sample {clean_sample.id}")
+    system_message = (
+        "You are an expert PII redaction model.\n"
+        "Given a text, you must return a JSON object with exactly:\n"
+        '{ "redacted_text": "...", "entities": [ ... ] }\n\n'
+        "Where entities is a list of objects with keys: value, replacement_token, reason.\n"
+        "Do NOT include any explanation or text outside the JSON object."
+    )
 
-    # You can choose between different prompts.
-    # For now, use the general multi-PII noise prompt.
-    prompt = general_noise_prompt(ctx)
-    # or for very hard examples:
-    # prompt = multi_pii_super_prompt(ctx)
+    user_message = (
+        f"Question: {question}\n\n"
+        "Text to redact:\n"
+        f"\"\"\"{context}\"\"\"\n\n"
+        "Return ONLY a JSON object with keys 'redacted_text' and 'entities'."
+    )
 
-    raw = call_teacher_raw(prompt)
-    variants = parse_teacher_output(raw)
+    completion = client.chat.completions.create(
+        model=TEACHER_MODEL_NAME,
+        messages=[
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=0.2,
+        max_tokens=1024,
+    )
 
-    # Each `variants[i]` is expected to have:
-    #   - variants[i]["corrupted"]
-    #   - variants[i]["answer"]
-    return variants
+    raw = completion.choices[0].message.content.strip()
 
+    try:
+        answer = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print("[TEACHER_API] Invalid JSON from call_teacher_redact_single:")
+        print(raw)
+        raise e
+
+    if not isinstance(answer, dict):
+        raise ValueError("Teacher redact_single must return a JSON object.")
+    if "redacted_text" not in answer or "entities" not in answer:
+        raise ValueError("Teacher redact_single must return 'redacted_text' and 'entities'.")
+
+    return answer

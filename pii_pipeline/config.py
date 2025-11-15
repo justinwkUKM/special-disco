@@ -42,13 +42,13 @@ for _dir in [
 # ---------------------------------------------------------------------------
 
 # Number of regex/noise-based corrupted variants per clean sample
-REGEX_VARIANTS_PER_SAMPLE = 6
+REGEX_VARIANTS_PER_SAMPLE = 2
 
 # Number of teacher-model corrupted variants per clean sample
-TEACHER_VARIANTS_PER_SAMPLE = 4
+TEACHER_VARIANTS_PER_SAMPLE = 2
 
 # Maximum allowed variants per PII type (used in balancing)
-MAX_VARIANTS_PER_TYPE = 5000
+MAX_VARIANTS_PER_TYPE = 5
 
 # Whether to shuffle dataset before final export
 SHUFFLE_FINAL_DATASET = True
@@ -61,7 +61,7 @@ RNG_SEED = 12345
 # MODEL CONFIG
 # ---------------------------------------------------------------------------
 
-TEACHER_MODEL_NAME = "gpt-5.1"   # or openai/gpt-5.1, depending on API
+TEACHER_MODEL_NAME = "gpt-4.1-mini"   # or openai/gpt-5.1, depending on API
 TEMPERATURE = 0.8
 TOP_P = 0.9
 MAX_TOKENS = 350
