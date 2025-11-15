@@ -1,6 +1,6 @@
 """
 dataset_generator.py
-Full pipeline logic for generating the PII redaction dataset:
+Full pipeline logic for generating the PII redaction dataset.
 
 Process:
 1. Load base clean samples.
@@ -10,13 +10,6 @@ Process:
 5. Deduplicate.
 6. Validate against schemas.
 7. Export JSONL dataset.
-
-Uses:
-- pii_mutation_engine_v2.py
-- teacher_prompts.py
-- utils.py
-- schemas.py
-- config.py
 """
 
 import json
@@ -26,8 +19,6 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from config import (
     BASE_CLEAN_FILE,
-    RAW_MUTATED_DIR,
-    TEACHER_GENERATED_DIR,
     FINAL_DATASET_DIR,
     REGEX_VARIANTS_PER_SAMPLE,
     TEACHER_VARIANTS_PER_SAMPLE,
@@ -67,7 +58,7 @@ def load_clean_samples() -> List[CleanSample]:
     if not BASE_CLEAN_FILE.exists():
         raise FileNotFoundError(f"Clean base file not found: {BASE_CLEAN_FILE}")
     data = json.loads(BASE_CLEAN_FILE.read_text())
-    clean_samples = []
+    clean_samples: List[CleanSample] = []
     for item in data:
         cs = CleanSample(**item)
         cs.validate()
@@ -81,10 +72,10 @@ def load_clean_samples() -> List[CleanSample]:
 # ---------------------------------------------------------------------------
 
 def generate_regex_mutations(sample: CleanSample) -> List[MutatedVariant]:
-    variants = []
+    variants: List[MutatedVariant] = []
     mutated_contexts = mutate_context(
         sample.context,
-        num=REGEX_VARIANTS_PER_SAMPLE
+        num=REGEX_VARIANTS_PER_SAMPLE,
     )
 
     for ctx in mutated_contexts:
@@ -93,11 +84,12 @@ def generate_regex_mutations(sample: CleanSample) -> List[MutatedVariant]:
             parent_id=sample.id,
             mutated_context=ctx,
             mutation_type="regex",
-            metadata={"note": "regex-based corruption"}
+            metadata={"note": "regex-based corruption"},
         )
         mv.validate()
         variants.append(mv)
 
+    log(f"[REGEX] sample={sample.id} generated_variants={len(variants)}")
     return variants
 
 
@@ -125,17 +117,24 @@ def generate_teacher_mutations(sample: CleanSample) -> List[Dict[str, Any]]:
     """
 
     context = sample.context.lower()
+
+    # Choose a PII-type-focused prompt
     if "@" in context or "(at)" in context:
         prompt = email_noise_prompt(sample.context)
+        log(f"[TEACHER] sample={sample.id} using=email_noise_prompt")
     elif any(x in context for x in ["-", "(", ")", "+", "call"]):
         prompt = phone_noise_prompt(sample.context)
-    elif any(x in context for x in ["st", "street", "ave", "road", "rd"]):
+        log(f"[TEACHER] sample={sample.id} using=phone_noise_prompt")
+    elif any(x in context for x in [" st ", "street", " ave", " road", " rd "]):
         prompt = address_noise_prompt(sample.context)
-    elif any(x.isdigit() for x in context) and len(context) > 14:
+        log(f"[TEACHER] sample={sample.id} using=address_noise_prompt")
+    elif any(ch.isdigit() for ch in context) and len(context) > 14:
         prompt = credit_card_noise_prompt(sample.context)
+        log(f"[TEACHER] sample={sample.id} using=credit_card_noise_prompt")
     else:
-        # fallback
+        # fallback: general multi-PII prompt
         prompt = general_noise_prompt(sample.context)
+        log(f"[TEACHER] sample={sample.id} using=general_noise_prompt")
 
     try:
         teacher_outputs = generate_teacher_variants(sample, prompt=prompt)
@@ -338,6 +337,19 @@ def create_final_records(
     mutated_variants: Sequence[MutatedVariant],
     teacher_variants: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> List[FinalRecord]:
+    """
+    Build FinalRecord objects from:
+      - regex-mutated variants (mutated_variants)
+      - teacher-generated corrupted variants (teacher_variants)
+
+    Regex variants:
+      - If USE_TEACHER_FOR_REGEX_LABELS = True:
+          Ask teacher to redact each mutated context, use that as gold answer.
+      - Else:
+          Fallback to using the clean sample.answer (less accurate but cheaper).
+
+    Teacher variants:
+      - Already contain both 'corrupted' text and 'answer' (gold redaction) directly.
 
     records: List[FinalRecord] = []
 
@@ -378,6 +390,7 @@ def create_final_records(
                 continue
 
             records.append(record)
+            log_record_added("teacher", sample_id, record.id, tv["corrupted"])
 
     return records
 
@@ -388,12 +401,13 @@ def create_final_records(
 
 def dedupe_records(records: Sequence[FinalRecord]) -> List[FinalRecord]:
     seen = set()
-    unique = []
+    unique: List[FinalRecord] = []
     for r in records:
         key = (r.context, r.answer.redacted_text)
         if key not in seen:
             unique.append(r)
             seen.add(key)
+    log(f"[DEDUP] input_records={len(records)} unique_records={len(unique)}")
     return unique
 
 
@@ -406,7 +420,7 @@ def generate_full_dataset() -> List[Dict[str, Any]]:
     all_records: List[FinalRecord] = []
 
     for sample in clean_samples:
-        log(f"Processing sample {sample.id}...")
+        log(f"--- Processing sample {sample.id} ---")
 
         # 1. Regex corruption
         regex_variants = generate_regex_mutations(sample)
@@ -417,6 +431,7 @@ def generate_full_dataset() -> List[Dict[str, Any]]:
 
         # 3. Pack records
         records = create_final_records(sample, regex_variants, teacher_variants)
+        log(f"[SUMMARY] sample={sample.id} records_added={len(records)}")
 
         all_records.extend(records)
 
@@ -427,6 +442,7 @@ def generate_full_dataset() -> List[Dict[str, Any]]:
     if SHUFFLE_FINAL_DATASET:
         import random
         random.shuffle(all_records)
+        log("[SHUFFLE] Final dataset shuffled")
 
     return [r.to_dict() for r in all_records]
 
@@ -440,4 +456,3 @@ def export_dataset_jsonl():
     out_path = FINAL_DATASET_DIR / "pii_training_dataset.jsonl"
     write_jsonl(out_path, final_records)
     log(f"Exported {len(final_records)} final records to: {out_path}")
-

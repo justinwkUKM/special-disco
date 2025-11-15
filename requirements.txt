@@ -1,0 +1,27 @@
+# Core utilities
+jsonlines==4.0.0
+regex==2023.12.25
+tqdm==4.66.1
+
+# API clients
+openai>=1.12.0      # For ChatGPT 5.1 calls (new API format)
+
+# Data processing
+python-dotenv==1.0.1
+pydantic==2.6.3
+
+# Optional ML / Training (uncomment if fine-tuning locally)
+# torch==2.2.0
+# transformers==4.42.0
+# accelerate==0.30.0
+# datasets==2.19.0
+
+# QA & validation
+jsonschema==4.21.1
+
+# Dev tools
+black==24.3.0
+flake8==7.0.0
+
+# Only if you need HuggingFace hub integration
+# huggingface_hub==0.21.3

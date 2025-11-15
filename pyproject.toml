@@ -1,0 +1,34 @@
+[project]
+name = "pii-redaction-pipeline"
+version = "0.1.0"
+description = "Synthetic PII redaction dataset generator and mutation engine"
+authors = [{ name = "Your Name" }]
+requires-python = ">=3.10"
+
+dependencies = [
+    "jsonlines>=4.0.0",
+    "regex>=2023.12.25",
+    "tqdm>=4.66.1",
+    "openai>=1.12.0",
+    "python-dotenv>=1.0.1",
+    "pydantic>=2.6.3",
+    "jsonschema>=4.21.1",
+]
+
+# Optional extras for training Gemma 3 270M with Transformers
+[project.optional-dependencies]
+training = [
+    "torch>=2.2.0",
+    "transformers>=4.42.0",
+    "accelerate>=0.30.0",
+    "datasets>=2.19.0",
+]
+
+dev = [
+    "black>=24.3.0",
+    "flake8>=7.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
